@@ -11,9 +11,37 @@ use warp::{
     reject::Reject,
 };
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct Question {
+    id: QuestionId,
+    title: String,
+    content: String,
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, Hash, PartialEq)]
+struct QuestionId(String);
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct Answer {
+    id: AnswerId,
+    content: String,
+    question_id: QuestionId,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, Hash, PartialEq)]
+struct AnswerId(String);
+
+#[derive(Debug)]
+struct Pagination {
+    start: usize,
+    end: usize,
+}
+
 #[derive(Clone)]
 struct Store {
     questions: Arc<RwLock<HashMap<QuestionId, Question>>>,
+    answers: Arc<RwLock<HashMap<AnswerId, Answer>>>,
 }
 
 impl Store {
@@ -25,20 +53,10 @@ impl Store {
     fn new() -> Self {
         Store {
             questions: Arc::new(RwLock::new(Self::init())),
+            answers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct Question {
-    id: QuestionId,
-    title: String,
-    content: String,
-    tags: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Eq, Hash, PartialEq)]
-struct QuestionId(String);
 
 #[derive(Debug)]
 enum Error {
@@ -61,10 +79,30 @@ impl std::fmt::Display for Error {
 
 impl Reject for Error {}
 
-#[derive(Debug)]
-struct Pagination {
-    start: usize,
-    end: usize,
+async fn return_error(r: Rejection) -> Result<impl Reply, Rejection> {
+    if let Some(error) = r.find::<Error>() {
+        let code = match error {
+            Error::QuestionNotFound => StatusCode::NOT_FOUND,
+            Error::InvalidRange(_) => StatusCode::RANGE_NOT_SATISFIABLE,
+            _ => StatusCode::BAD_REQUEST, // For ParseError, MissingParameters, etc.
+        };
+        Ok(warp::reply::with_status(error.to_string(), code))
+    } else if let Some(error) = r.find::<BodyDeserializeError>() {
+        Ok(warp::reply::with_status(
+            error.to_string(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ))
+    } else if let Some(error) = r.find::<CorsForbidden>() {
+        Ok(warp::reply::with_status(
+            error.to_string(),
+            StatusCode::FORBIDDEN,
+        ))
+    } else {
+        Ok(warp::reply::with_status(
+            "Route not found".to_string(),
+            StatusCode::NOT_FOUND,
+        ))
+    }
 }
 
 fn extract_pagination(params: HashMap<String, String>) -> Result<Pagination, Error> {
@@ -155,30 +193,22 @@ async fn delete_question(id: String, store: Store) -> Result<impl warp::Reply, w
     }
 }
 
-async fn return_error(r: Rejection) -> Result<impl Reply, Rejection> {
-    if let Some(error) = r.find::<Error>() {
-        let code = match error {
-            Error::QuestionNotFound => StatusCode::NOT_FOUND,
-            Error::InvalidRange(_) => StatusCode::RANGE_NOT_SATISFIABLE,
-            _ => StatusCode::BAD_REQUEST, // For ParseError, MissingParameters, etc.
-        };
-        Ok(warp::reply::with_status(error.to_string(), code))
-    } else if let Some(error) = r.find::<BodyDeserializeError>() {
-        Ok(warp::reply::with_status(
-            error.to_string(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ))
-    } else if let Some(error) = r.find::<CorsForbidden>() {
-        Ok(warp::reply::with_status(
-            error.to_string(),
-            StatusCode::FORBIDDEN,
-        ))
-    } else {
-        Ok(warp::reply::with_status(
-            "Route not found".to_string(),
-            StatusCode::NOT_FOUND,
-        ))
-    }
+async fn add_answer(
+    store: Store,
+    params: HashMap<String, String>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let answer = Answer {
+        id: AnswerId(String::from("1")),
+        content: params.get("content").unwrap().to_string(),
+        question_id: QuestionId(params.get("questionId").unwrap().to_string()),
+    };
+
+    store
+        .answers
+        .write()
+        .await
+        .insert(answer.id.clone(), answer);
+    Ok(warp::reply::with_status("Answer added", StatusCode::OK))
 }
 
 #[tokio::main]
@@ -220,10 +250,18 @@ async fn main() {
         .and(store_filter.clone())
         .and_then(delete_question);
 
+    let add_answer = warp::post()
+        .and(warp::path("comments"))
+        .and(warp::path::end())
+        .and(store_filter.clone())
+        .and(warp::body::form())
+        .and_then(add_answer);
+
     let routes = get_questions
         .or(add_question)
         .or(update_question)
         .or(delete_question)
+        .or(add_answer)
         .with(cors)
         .recover(return_error);
 
