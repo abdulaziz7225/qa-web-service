@@ -39,6 +39,7 @@ struct QuestionId(String);
 enum Error {
     ParseError(std::num::ParseIntError),
     MissingParameters,
+    InvalidRange(String),
 }
 
 impl std::fmt::Display for Error {
@@ -46,6 +47,7 @@ impl std::fmt::Display for Error {
         match *self {
             Error::ParseError(ref err) => write!(f, "Cannot parse parameter: {err}"),
             Error::MissingParameters => write!(f, "Missing parameter"),
+            Error::InvalidRange(ref err) => write!(f, "Invalid pagination range: {err}"),
         }
     }
 }
@@ -81,13 +83,35 @@ async fn get_questions(
     params: HashMap<String, String>,
     store: Store,
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    let res: Vec<Question> = store.questions.values().cloned().collect();
+
     if !params.is_empty() {
         let pagination = extract_pagination(params)?;
-        let res: Vec<Question> = store.questions.values().cloned().collect();
+        let count = res.len();
+
+        if pagination.start > pagination.end {
+            return Err(warp::reject::custom(Error::InvalidRange(String::from(
+                "The 'start' parameter cannot be greater than 'end' parameter",
+            ))));
+        }
+        
+        if pagination.start > count {
+            return Err(warp::reject::custom(Error::InvalidRange(format!(
+                "The 'start' ({0}) and 'end' parameters ({1}) is out of bound. There are only {2} questions",
+                pagination.start, pagination.end, count
+            ))));
+        }
+
+        if pagination.end > count {
+            return Err(warp::reject::custom(Error::InvalidRange(format!(
+                "The 'end' parameter ({0}) is out of bound. There are only {1} questions",
+                pagination.end, count
+            ))));
+        }
+
         let res = &res[pagination.start..pagination.end];
         Ok(warp::reply::json(&res))
     } else {
-        let res: Vec<Question> = store.questions.values().cloned().collect();
         Ok(warp::reply::json(&res))
     }
 }
