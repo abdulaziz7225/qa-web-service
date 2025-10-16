@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::str::FromStr;
 
@@ -6,6 +7,33 @@ use warp::{
     Filter, Rejection, Reply, filters::cors::CorsForbidden, http::Method, http::StatusCode,
     reject::Reject,
 };
+
+struct Store {
+    questions: HashMap<QuestionId, Question>,
+}
+
+impl Store {
+    fn init(self) -> Self {
+        let question = Question::new(
+            QuestionId::from_str("1").expect("ID not set"),
+            String::from("How!"),
+            String::from("Please help!"),
+            Some(vec![String::from("general")]),
+        );
+        self.add_question(question)
+    }
+
+    fn new() -> Self {
+        Store {
+            questions: HashMap::new(),
+        }
+    }
+
+    fn add_question(mut self, question: Question) -> Self {
+        self.questions.insert(question.id.clone(), question);
+        self
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct Question {
@@ -15,7 +43,7 @@ struct Question {
     tags: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Eq, Hash, PartialEq)]
 struct QuestionId(String);
 
 impl Question {
