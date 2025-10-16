@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use warp::{
     Filter, Rejection, Reply, filters::cors::CorsForbidden, http::Method, http::StatusCode,
@@ -8,7 +10,7 @@ use warp::{
 
 #[derive(Clone)]
 struct Store {
-    questions: HashMap<QuestionId, Question>,
+    questions: Arc<RwLock<HashMap<QuestionId, Question>>>,
 }
 
 impl Store {
@@ -19,7 +21,7 @@ impl Store {
 
     fn new() -> Self {
         Store {
-            questions: Self::init(),
+            questions: Arc::new(RwLock::new(Self::init())),
         }
     }
 }
@@ -40,6 +42,7 @@ enum Error {
     ParseError(std::num::ParseIntError),
     MissingParameters,
     InvalidRange(String),
+    QuestionNotFound,
 }
 
 impl std::fmt::Display for Error {
@@ -48,6 +51,7 @@ impl std::fmt::Display for Error {
             Error::ParseError(ref err) => write!(f, "Cannot parse parameter: {err}"),
             Error::MissingParameters => write!(f, "Missing parameter"),
             Error::InvalidRange(ref err) => write!(f, "Invalid pagination range: {err}"),
+            Error::QuestionNotFound => write!(f, "Question not found"),
         }
     }
 }
@@ -83,7 +87,7 @@ async fn get_questions(
     params: HashMap<String, String>,
     store: Store,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let res: Vec<Question> = store.questions.values().cloned().collect();
+    let res: Vec<Question> = store.questions.read().await.values().cloned().collect();
 
     if !params.is_empty() {
         let pagination = extract_pagination(params)?;
@@ -94,7 +98,7 @@ async fn get_questions(
                 "The 'start' parameter cannot be greater than 'end' parameter",
             ))));
         }
-        
+
         if pagination.start > count {
             return Err(warp::reject::custom(Error::InvalidRange(format!(
                 "The 'start' ({0}) and 'end' parameters ({1}) is out of bound. There are only {2} questions",
@@ -116,11 +120,41 @@ async fn get_questions(
     }
 }
 
+async fn add_question(
+    store: Store,
+    question: Question,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    store
+        .questions
+        .write()
+        .await
+        .insert(question.id.clone(), question);
+
+    Ok(warp::reply::with_status("Question added", StatusCode::OK))
+}
+
+async fn update_question(
+    id: String,
+    store: Store,
+    question: Question,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match store.questions.write().await.get_mut(&QuestionId(id)) {
+        Some(q) => *q = question,
+        None => return Err(warp::reject::custom(Error::QuestionNotFound)),
+    }
+    Ok(warp::reply::with_status("Question updated", StatusCode::OK))
+}
+
 async fn return_error(r: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(error) = r.find::<Error>() {
         Ok(warp::reply::with_status(
             error.to_string(),
             StatusCode::RANGE_NOT_SATISFIABLE,
+        ))
+    } else if let Some(error) = r.find::<warp::filters::body::BodyDeserializeError>() {
+        Ok(warp::reply::with_status(
+            error.to_string(),
+            StatusCode::BAD_REQUEST,
         ))
     } else if let Some(error) = r.find::<CorsForbidden>() {
         Ok(warp::reply::with_status(
@@ -145,14 +179,24 @@ async fn main() {
         .allow_header("content-type")
         .allow_methods(&[Method::GET, Method::POST, Method::PUT, Method::DELETE]);
 
-    let get_items = warp::get()
+    let get_questions = warp::get()
         .and(warp::path("questions"))
         .and(warp::path::end())
         .and(warp::query())
-        .and(store_filter)
+        .and(store_filter.clone())
         .and_then(get_questions);
 
-    let routes = get_items.with(cors);
+    let add_question = warp::post()
+        .and(warp::path("questions"))
+        .and(warp::path::end())
+        .and(store_filter.clone())
+        .and(warp::body::json())
+        .and_then(add_question);
+
+    let routes = get_questions
+        .or(add_question)
+        .with(cors)
+        .recover(return_error);
 
     warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
 }
