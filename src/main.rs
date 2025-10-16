@@ -4,7 +4,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use warp::{
-    Filter, Rejection, Reply, filters::cors::CorsForbidden, http::Method, http::StatusCode,
+    Filter, Rejection, Reply,
+    filters::{body::BodyDeserializeError, cors::CorsForbidden},
+    http::Method,
+    http::StatusCode,
     reject::Reject,
 };
 
@@ -147,14 +150,16 @@ async fn update_question(
 
 async fn return_error(r: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(error) = r.find::<Error>() {
+        let code = match error {
+            Error::QuestionNotFound => StatusCode::NOT_FOUND,
+            Error::InvalidRange(_) => StatusCode::RANGE_NOT_SATISFIABLE,
+            _ => StatusCode::BAD_REQUEST, // For ParseError, MissingParameters, etc.
+        };
+        Ok(warp::reply::with_status(error.to_string(), code))
+    } else if let Some(error) = r.find::<BodyDeserializeError>() {
         Ok(warp::reply::with_status(
             error.to_string(),
-            StatusCode::RANGE_NOT_SATISFIABLE,
-        ))
-    } else if let Some(error) = r.find::<warp::filters::body::BodyDeserializeError>() {
-        Ok(warp::reply::with_status(
-            error.to_string(),
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
         ))
     } else if let Some(error) = r.find::<CorsForbidden>() {
         Ok(warp::reply::with_status(
@@ -193,8 +198,17 @@ async fn main() {
         .and(warp::body::json())
         .and_then(add_question);
 
+    let update_question = warp::put()
+        .and(warp::path("questions"))
+        .and(warp::path::param::<String>())
+        .and(warp::path::end())
+        .and(store_filter.clone())
+        .and(warp::body::json())
+        .and_then(update_question);
+
     let routes = get_questions
         .or(add_question)
+        .or(update_question)
         .with(cors)
         .recover(return_error);
 
